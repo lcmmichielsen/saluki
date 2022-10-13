@@ -133,11 +133,11 @@ def main():
 
   # write target-level statistics
   targets_acc_df = pd.DataFrame({
-    'index': targets_df.index,
-    'pearsonr': test_metric1,
-    'r2': test_metric2,
-    'identifier': targets_df.identifier,
-    'description': targets_df.description
+    'index': np.squeeze(targets_df.index),
+    'pearsonr': np.squeeze(test_metric1),
+    'r2': np.squeeze(test_metric2)
+#    'identifier': targets_df.identifier,
+#    'description': targets_df.description
     })
 
   targets_acc_df.to_csv('%s/acc.txt'%options.out_dir, sep='\t',

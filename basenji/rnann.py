@@ -144,7 +144,8 @@ class RnaNN:
     self.models = []
     for hi in range(self.heads):
       prediction = tf.keras.layers.Dense(self.num_targets[hi],
-                                         kernel_initializer=self.initializer)(current)
+                                         kernel_initializer=self.initializer,
+                                         activation='sigmoid')(current)
       self.models.append(tf.keras.Model(inputs=sequence, outputs=prediction))
     
     self.model = self.models[0]

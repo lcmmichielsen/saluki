@@ -429,7 +429,7 @@ class RnaDataset:
       return targets
 
 
-class RnaDataset:
+class ExonDataset:
   def __init__(self, data_dir, split_label, batch_size,
                mode='eval', shuffle_buffer=1024):
     """Initialize basic parameters; run make_dataset."""
@@ -444,7 +444,7 @@ class RnaDataset:
     data_stats_file = '%s/statistics.json' % self.data_dir
     with open(data_stats_file) as data_stats_open:
       data_stats = json.load(data_stats_open)
-    self.length_t = data_stats['length_t']
+    self.max_seq_length = data_stats['seq_length']
 
     # self.seq_depth = data_stats.get('seq_depth',4)
     self.target_length = data_stats['target_length']
@@ -468,45 +468,38 @@ class RnaDataset:
       """Parse TFRecord protobuf."""
 
       feature_spec = {
-        'lengths': tf.io.FixedLenFeature((1,), tf.int64),
+        'length': tf.io.FixedLenFeature([], tf.string),
         'sequence': tf.io.FixedLenFeature([], tf.string),
-        'coding': tf.io.FixedLenFeature([], tf.string),
-        'splice': tf.io.FixedLenFeature([], tf.string),
-        'targets': tf.io.FixedLenFeature([], tf.string)
+        'splicing': tf.io.FixedLenFeature([], tf.string),
+        'target': tf.io.FixedLenFeature([], tf.string)
       }
 
       # parse example into features
       feature_tensors = tf.io.parse_single_example(example_protos, features=feature_spec)
 
       # decode targets
-      targets = tf.io.decode_raw(feature_tensors['targets'], tf.float16)
+      targets = tf.io.decode_raw(feature_tensors['target'], tf.float16)
       targets = tf.cast(targets, tf.float32)
-
-      # get length
-      seq_lengths = feature_tensors['lengths']
 
       # decode sequence
       sequence = tf.io.decode_raw(feature_tensors['sequence'], tf.uint8)
-      sequence = tf.one_hot(sequence, 4)
+      sequence = tf.reshape(sequence, [-1, 4])
       sequence = tf.cast(sequence, tf.float32)
-
-      # decode coding frame
-      coding = tf.io.decode_raw(feature_tensors['coding'], tf.uint8)
-      coding = tf.expand_dims(coding, axis=1)
-      coding = tf.cast(coding, tf.float32)
+      
+      # get length
+      seq_lengths = tf.io.decode_raw(feature_tensors['length'], tf.int64)
 
       # decode splice
-      splice = tf.io.decode_raw(feature_tensors['splice'], tf.uint8)
-      splice = tf.expand_dims(splice, axis=1)
+      splice = tf.io.decode_raw(feature_tensors['splicing'], tf.uint8)
+      splice = tf.expand_dims(splice, 1)
       splice = tf.cast(splice, tf.float32)
 
       # concatenate input tracks
-      inputs = tf.concat([sequence,coding,splice], axis=1)
-      # inputs = tf.concat([sequence,splice], axis=1)
+      inputs = tf.concat([sequence,splice], axis=1)
       # inputs = tf.concat([sequence,coding], axis=1)
 
       # pad to zeros to full length
-      paddings = [[0, self.length_t-seq_lengths[0]],[0,0]]
+      paddings = [[0, self.max_seq_length-seq_lengths[0]],[0,0]]
       inputs = tf.pad(inputs, paddings)
 
       return inputs, targets
