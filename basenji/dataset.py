@@ -478,8 +478,8 @@ class ExonDataset:
       feature_tensors = tf.io.parse_single_example(example_protos, features=feature_spec)
 
       # decode targets
-      targets = tf.io.decode_raw(feature_tensors['target'], tf.float16)
-      targets = tf.cast(targets, tf.float32)
+      targets = tf.io.decode_raw(feature_tensors['target'], tf.float64)
+      targets = tf.cast(targets, tf.float64)
 
       # decode sequence
       sequence = tf.io.decode_raw(feature_tensors['sequence'], tf.uint8)
@@ -647,8 +647,8 @@ class RnaDatasetVikram:
       feature_tensors = tf.io.parse_single_example(example_protos, features=feature_spec)
 
       # decode targets
-      targets = tf.io.decode_raw(feature_tensors['targets'], tf.float16)
-      targets = tf.cast(targets, tf.float32)
+      targets = tf.io.decode_raw(feature_tensors['targets'], tf.float64)
+      targets = tf.cast(targets, tf.float64)
 
       # decode targets
       # isoFreq = tf.io.decode_raw(feature_tensors['isoFreq'], tf.float16)
