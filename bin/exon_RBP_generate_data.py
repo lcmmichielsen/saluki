@@ -9,6 +9,7 @@ import os
 import argparse
 import json
 import shutil
+import pickle
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import StratifiedGroupKFold
@@ -27,6 +28,8 @@ parser.add_argument('--dir',            dest='dir',             default='/tudelf
                     help='Directory with the sequences and half-life time')
 parser.add_argument('--var_tokeep',     dest='var_tokeep',          type=str,       default="Cons,High,Low,Medium",
                     help='Which type of exons to use during training')
+parser.add_argument('--RBPs',           dest='RBPs',                type=str,       default="UCHL5,AQR,BUD13,HNRNPC,YBX3,PPIG",
+                    help='Which RBPs to add as input')
 parser.add_argument('--cell_type',      dest='cell_type',           type=str,       default='Human_Astro',
                     help='Which celltype')
 args = parser.parse_args()
@@ -34,6 +37,7 @@ args = parser.parse_args()
 general_dir = args.dir
 cell_type = args.cell_type
 var_tokeep = np.asarray(args.var_tokeep.split(','))
+RBPs = np.asarray(args.RBPs.split(','))
 
 try:
     os.mkdir(general_dir)
@@ -57,17 +61,6 @@ PSI.index = PSI['HumanExon'] + '_' + PSI['HumanGene']
 
 PSI_celltype = PSI[[cell_type, 'variabilityStatus', 'HumanGene']]
 PSI_tokeep = PSI_celltype[PSI_celltype[cell_type].isna() == False]
-
-
-# PSI_glia = np.mean(PSI.iloc[:,2:4], axis=1)
-# PSI_neurons = np.mean(PSI.iloc[:,4:6], axis=1)
-# PSI_glia_neurons = pd.concat((PSI_glia, PSI_neurons),axis=1)
-# PSI_glia_neurons.columns = ['Glia', 'Neurons']
-# PSI_glia_neurons['varStatus'] = PSI['variabilityStatus']
-# PSI_glia_neurons.index = PSI.index
-# PSI_glia_neurons['HumanGene'] = PSI['HumanGene']
-# PSI_tokeep = PSI_glia_neurons[np.sum(PSI_glia_neurons.isna(), axis=1) == 0]
-
 
 # Do the CV
 # Now we only save 1 fold to test things quickly
@@ -132,6 +125,12 @@ genes = pd.DataFrame(np.hstack((split,np.reshape(PSI_tokeep['variabilityStatus']
 genes = genes[genes['split'] != '']
 genes.to_csv(general_dir + '/genes.csv')
 
+## Load the peaks
+peaks_path = '/tudelft.net/staff-bulk/ewi/insy/DBL/lmichielsen/PSI_project/eCLIP/RBP_coor_repl.pickle'
+with open(peaks_path, 'rb') as handle:
+    RBP_coor_repl, rows, columns = pickle.load(handle)
+peaks = pd.DataFrame(RBP_coor_repl, index=rows, columns=columns)
+
 # Options TFR writer
 # To Do: make these options of the argparser..
 tf_opts = tf.io.TFRecordOptions(compression_type='ZLIB')
@@ -180,12 +179,13 @@ for fi in range(num_folds):
             # And that for the last batch we stop on time (si < num_set)
             while ti < seqs_per_tfr and si < num_set:
                 # Get the genes that should be in this set
-                gene = exon_ID_set[si]
+                ID = exon_ID_set[si]
                 seq_chrm = exon_info_set['chr'].iloc[si]
                 seq_start = int(exon_info_set['start'].iloc[si])
                 seq_end = int(exon_info_set['end'].iloc[si])+1 #Because fasta.fetch doesn't include end bp
                 seq_strand = exon_info_set['strand'].iloc[si]
-                
+                gene = exon_info_set['ENSG'].iloc[si]
+
                 if(seq_end-seq_start+2*padding) > max_seq_length:
                     pad_temp = np.floor((max_seq_length - (seq_end-seq_start+1))/2)
                     seq_start_ = seq_start - pad_temp
@@ -199,7 +199,8 @@ for fi in range(num_folds):
                 seq_dna = fasta_open.fetch(seq_chrm, seq_start_, seq_end_)
 
                 # verify length
-                assert(len(seq_dna) <= max_seq_length)
+                len_DNA = len(seq_dna)
+                assert(len_DNA <= max_seq_length)
 
                 # orient
                 if seq_strand == '-':
@@ -216,13 +217,27 @@ for fi in range(num_folds):
                 # get targets
                 targets = PSI_val_set.iloc[si].values
                 targets = targets.reshape((1,-1)).astype('float64')
-                
+
+                # one hot encode RBPs
+                num_RBPs = np.array(len(RBPs), dtype=np.int64)
+                RBP_onehot = np.zeros((len_DNA,num_RBPs), dtype=np.int8)
+                for i, rbp in enumerate(RBPs):
+                    p = np.array(peaks[rbp].loc[gene], dtype=int)
+                    p = p - int(seq_start_)
+                    p[p<0] = 0
+                    p[p>len_DNA] = 0
+
+                    for j in p:
+                        RBP_onehot[j[0]:j[1],i] = 1
+
                 # make example
                 example = tf.train.Example(features=tf.train.Features(feature={
                     'length': _bytes_feature(seq_len.flatten().tostring()),
+                    'numRBPs': _bytes_feature(num_RBPs.flatten().tostring()),
                     'sequence': _bytes_feature(seq_1hot.flatten().tostring()),
                     'target': _bytes_feature(targets.flatten().tostring()),
-                    'splicing': _bytes_feature(splicing.flatten().tostring())}))
+                    'splicing': _bytes_feature(splicing.flatten().tostring()),
+                    'peaks': _bytes_feature(RBP_onehot.flatten().tostring())}))
 
                 # write
                 writer.write(example.SerializeToString())
@@ -247,5 +262,37 @@ with open('%s/statistics.json' % general_dir, 'w') as stats_json_out:
     json.dump(stats_dict, stats_json_out, indent=4)
 
 # Copy the params.json
+train_dict = {}
+train_dict['batch_size'] = 64
+train_dict['optimizer'] = 'adam'
+train_dict['loss'] = 'mse'
+train_dict['learning_rate'] = 0.0001
+train_dict['adam_beta1'] = 0.90
+train_dict['adam_beta2'] = 0.998
+train_dict['global_clipnorm'] = 0.5
+train_dict['train_epochs_min'] = 100
+train_dict['train_epochs_max'] = 500
+train_dict['patience'] = 50
 
-shutil.copy2('/tudelft.net/staff-bulk/ewi/insy/DBL/lmichielsen/PSI_project/HumanHipp/tfrecords_glia_neurons/params.json', general_dir)
+model_dict = {}
+model_dict['activation'] = 'relu'
+model_dict['rnn_type'] = 'gru'
+model_dict['seq_length'] = max_seq_length
+model_dict['seq_depth'] = len(RBPs) + 5
+model_dict['augment_shift'] = 3
+model_dict['num_targets'] = 1
+model_dict['heads'] = 1
+model_dict['filters'] = 64
+model_dict['kernel_size'] = 5
+model_dict['dropout'] = 0.3
+model_dict['l2_scale'] = 0.001
+model_dict['ln_epsilon'] = 0.007
+model_dict['num_layers'] = 4
+model_dict['bn_momentum'] = 0.90
+
+params_dict = {}
+params_dict['train'] = train_dict
+params_dict['model'] = model_dict
+
+with open('%s/params.json' % general_dir, 'w') as params_json_out:
+    json.dump(params_dict, params_json_out, indent=4)

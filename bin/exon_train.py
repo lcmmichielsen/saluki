@@ -63,20 +63,38 @@ def main():
   # read datasets
   train_data = []
   eval_data = []
+  
+  if params_model['seq_depth'] == 5:
 
-  for data_dir in data_dirs:
-    # load train data
-    train_data.append(dataset.ExonDataset(data_dir,
-      split_label='train',
-      batch_size=params_train['batch_size'],
-      shuffle_buffer=params_train.get('shuffle_buffer', 1024),
-      mode='train'))
-
-    # load eval data
-    eval_data.append(dataset.ExonDataset(data_dir,
-      split_label='valid',
-      batch_size=params_train['batch_size'],
-      mode='eval'))
+      for data_dir in data_dirs:
+        # load train data
+        train_data.append(dataset.ExonDataset(data_dir,
+          split_label='train',
+          batch_size=params_train['batch_size'],
+          shuffle_buffer=params_train.get('shuffle_buffer', 1024),
+          mode='train'))
+    
+        # load eval data
+        eval_data.append(dataset.ExonDataset(data_dir,
+          split_label='valid',
+          batch_size=params_train['batch_size'],
+          mode='eval'))
+        
+  else:
+      
+      for data_dir in data_dirs:
+        # load train data
+        train_data.append(dataset.ExonRBPDataset(data_dir,
+          split_label='train',
+          batch_size=params_train['batch_size'],
+          shuffle_buffer=params_train.get('shuffle_buffer', 1024),
+          mode='train'))
+    
+        # load eval data
+        eval_data.append(dataset.ExonRBPDataset(data_dir,
+          split_label='valid',
+          batch_size=params_train['batch_size'],
+          mode='eval'))
 
   # initialize model
   seqnn_model = rnann.RnaNN(params_model)
