@@ -54,7 +54,7 @@ Test the accuracy of a trained model.
 # main
 ################################################################################
 def main():
-  usage = 'usage: %prog [options] <params_file> <model_file> <data_dir>'
+  usage = 'usage: %prog [options] <model_dir> <data_dir>'
   parser = OptionParser(usage)
   parser.add_option('--head', dest='head_i',
       default=0, type='int',
@@ -68,20 +68,16 @@ def main():
   parser.add_option('--shifts', dest='shifts',
       default='0',
       help='Ensemble prediction shifts [Default: %default]')
-  parser.add_option('-g', dest='genes_file',
-      default=None, type='str',
-      help='File specifying gene names and labels in table format')
   parser.add_option('--split', dest='split_label',
       default='test',
       help='Dataset split label for eg TFR pattern [Default: %default]')
   (options, args) = parser.parse_args()
 
-  if len(args) != 3:
+  if len(args) != 2:
     parser.error('Must provide parameters, model, and test data HDF5')
   else:
-    params_file = args[0]
-    model_file = args[1]
-    data_dir = args[2]
+    model_dir = args[0]
+    data_dir = args[1]
 
   if not os.path.isdir(options.out_dir):
     os.mkdir(options.out_dir)
@@ -93,23 +89,34 @@ def main():
   # inputs
 
   # read targets
-  if options.genes_file is None:
-    options.genes_file = '%s/genes.csv' % data_dir
-  genes_df = pd.read_csv(options.genes_file, index_col=0)
+  genes_file = '%s/genes.csv' % data_dir
+  genes_df = pd.read_csv(genes_file, index_col=0)
 
   # read model parameters
+  params_file = '%s/params.json' % data_dir
   with open(params_file) as params_open:
     params = json.load(params_open)
   params_model = params['model']
   params_train = params['train']
   
-  # construct eval data
-  eval_data = dataset.ExonDataset(data_dir,
-    split_label=options.split_label,
-    batch_size=params_train['batch_size'],
-    mode='eval')
+  if params_model['seq_depth'] == 5:
 
+    # load eval data
+    eval_data = dataset.ExonDataset(data_dir,
+        split_label=options.split_label,
+        batch_size=params_train['batch_size'],
+        mode='eval')
+        
+  else:
+      
+    # load eval data
+    eval_data =dataset.ExonRBPDataset(data_dir,
+        split_label=options.split_label,
+        batch_size=params_train['batch_size'],
+        mode='eval')
+  
   # initialize model
+  model_file = '%s/model_best.h5' % model_dir
   seqnn_model = rnann.RnaNN(params_model)
   seqnn_model.restore(model_file, options.head_i)
   seqnn_model.build_ensemble(options.shifts)
@@ -128,7 +135,7 @@ def main():
 
   # write target-level statistics
   # so metric for every cell type
-  targets_acc_df = pd.DataFrame(np.transpose(np.vstack((np.squeeze(genes_df.columns[2:]),
+  targets_acc_df = pd.DataFrame(np.transpose(np.vstack((np.squeeze(genes_df.columns[2]),
                                                        np.squeeze(test_metric1),
                                                        np.squeeze(test_metric2)))),
                                 columns=['target', 'pearsonR', 'R2']
