@@ -431,7 +431,8 @@ class RnaDataset:
 
 class ExonDataset:
   def __init__(self, data_dir, split_label, batch_size,
-               mode='eval', shuffle_buffer=1024):
+               mode='eval', shuffle_buffer=1024,
+               splice_track=True):
     """Initialize basic parameters; run make_dataset."""
 
     self.data_dir = data_dir
@@ -439,6 +440,7 @@ class ExonDataset:
     self.shuffle_buffer = shuffle_buffer
     self.mode = mode
     self.split_label = split_label
+    self.splice_track = splice_track
 
     # read data parameters
     data_stats_file = '%s/statistics.json' % self.data_dir
@@ -495,7 +497,10 @@ class ExonDataset:
       splice = tf.cast(splice, tf.float32)
 
       # concatenate input tracks
-      inputs = tf.concat([sequence,splice], axis=1)
+      if self.splice_track:
+          inputs = tf.concat([sequence,splice], axis=1)
+      else:
+          inputs = tf.concat([sequence], axis=1)
       # inputs = tf.concat([sequence,coding], axis=1)
 
       # pad to zeros to full length
@@ -599,7 +604,8 @@ class ExonDataset:
   
 class ExonRBPDataset:
   def __init__(self, data_dir, split_label, batch_size,
-               mode='eval', shuffle_buffer=1024):
+               mode='eval', shuffle_buffer=1024, 
+               seq_track=True, splice_track=True):
     """Initialize basic parameters; run make_dataset."""
 
     self.data_dir = data_dir
@@ -607,6 +613,8 @@ class ExonRBPDataset:
     self.shuffle_buffer = shuffle_buffer
     self.mode = mode
     self.split_label = split_label
+    self.seq_track = seq_track
+    self.splice_track = splice_track
 
     # read data parameters
     data_stats_file = '%s/statistics.json' % self.data_dir
@@ -673,7 +681,14 @@ class ExonRBPDataset:
       peaks = tf.cast(peaks, tf.float32)
 
       # concatenate input tracks
-      inputs = tf.concat([sequence,splice,peaks], axis=1)
+      if self.splice_track & self.seq_track:
+          inputs = tf.concat([sequence,splice,peaks], axis=1)
+      elif self.splice_track:
+          inputs = tf.concat([splice,peaks], axis=1)
+      elif self.splice_track:
+          inputs = tf.concat([sequence,peaks], axis=1)
+      else:
+          inputs = tf.concat([peaks], axis=1)
       # inputs = tf.concat([sequence,coding], axis=1)
 
       # pad to zeros to full length

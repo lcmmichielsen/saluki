@@ -12,3 +12,12 @@ basenji.egg-info/
 data/hg19.fa*
 *.bak
 *.ini
+single_output/acc.txt
+single_output/checkpoint
+single_output/ckpt-231.index
+single_output/ckpt-231.data-00000-of-00001
+single_output/model_check.h5
+single_output/model_best.h5
+single_output/params.json
+single_output/preds.h5
+single_output/targets.h5

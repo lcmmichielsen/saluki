@@ -62,6 +62,16 @@ def main():
   parser.add_option('-o', dest='out_dir',
       default='test_out',
       help='Output directory for test statistics [Default: %default]')
+  parser.add_option('--rbp', dest='rbp_track',
+      default=0, type=int,
+      help='Whether to use RBP track as input')
+  parser.add_option('--seq', dest='seq_track',
+      default=1, type=int,
+      help='Whether to use seq track as input')
+  parser.add_option('--splice', dest='splice_track',
+      default=1, type=int,
+      help='Whether to use splice track as input')
+
   parser.add_option('--save', dest='save',
       default=False, action='store_true',
       help='Save targets and predictions numpy arrays [Default: %default]')
@@ -71,6 +81,9 @@ def main():
   parser.add_option('--split', dest='split_label',
       default='test',
       help='Dataset split label for eg TFR pattern [Default: %default]')
+  parser.add_option('--multihead', dest='multihead',
+      default=False,
+      help='Whether a multihead model was used during training')
   (options, args) = parser.parse_args()
 
   if len(args) != 2:
@@ -93,39 +106,50 @@ def main():
   genes_df = pd.read_csv(genes_file, index_col=0)
 
   # read model parameters
-  params_file = '%s/params.json' % data_dir
+  params_file = '%s/params.json' % model_dir
   with open(params_file) as params_open:
     params = json.load(params_open)
   params_model = params['model']
   params_train = params['train']
   
-  if params_model['seq_depth'] == 5:
-
-    # load eval data
-    eval_data = dataset.ExonDataset(data_dir,
-        split_label=options.split_label,
-        batch_size=params_train['batch_size'],
-        mode='eval')
-        
-  else:
-      
+  if options.rbp_track:
     # load eval data
     eval_data =dataset.ExonRBPDataset(data_dir,
         split_label=options.split_label,
         batch_size=params_train['batch_size'],
-        mode='eval')
-  
+        mode='eval', splice_track=options.splice_track,
+        seq_track=options.seq_track)
+    
+  else:
+    # load eval data
+    eval_data = dataset.ExonDataset(data_dir,
+        split_label=options.split_label,
+        batch_size=params_train['batch_size'],
+        mode='eval',
+        splice_track=options.splice_track)
+          
   # initialize model
-  model_file = '%s/model_best.h5' % model_dir
+  if options.multihead:
+      model_file = model_dir + '/model' + str(options.head_i) + '_best.h5'
+  else:
+      model_file = '%s/model_best.h5' % model_dir
+  print(model_file)
+  print(options.head_i)
+  
+  if options.seq_track == 0:
+      params_model['seq_depth'] -= 4
+  if options.splice_track == 0:
+      params_model['seq_depth'] -= 1
+  
   seqnn_model = rnann.RnaNN(params_model)
-  seqnn_model.restore(model_file, options.head_i)
+  seqnn_model.restore(model_file, head_i=int(options.head_i))
   seqnn_model.build_ensemble(options.shifts)
 
   #######################################################
   # evaluation
 
   # evaluate
-  test_loss, test_metric1, test_metric2 = seqnn_model.evaluate(eval_data)
+  test_loss, test_metric1, test_metric2 = seqnn_model.evaluate(eval_data, head_i=int(options.head_i))
 
   # print summary statistics
   # This is the average over all the targets 
@@ -135,7 +159,7 @@ def main():
 
   # write target-level statistics
   # so metric for every cell type
-  targets_acc_df = pd.DataFrame(np.transpose(np.vstack((np.squeeze(genes_df.columns[2]),
+  targets_acc_df = pd.DataFrame(np.transpose(np.vstack((np.squeeze(genes_df.columns[1]),
                                                        np.squeeze(test_metric1),
                                                        np.squeeze(test_metric2)))),
                                 columns=['target', 'pearsonR', 'R2']
@@ -149,7 +173,7 @@ def main():
 
   if options.save:
     # compute predictions
-    test_preds = seqnn_model.predict(eval_data).astype('float64')
+    test_preds = seqnn_model.predict(eval_data, head_i=int(options.head_i)).astype('float64')
 
     # read targets
     test_targets = eval_data.numpy(return_inputs=False)
@@ -167,6 +191,8 @@ def main():
     targets_h5.create_dataset('genes', data=gene_ids)
 
     targets_h5.close()
+    
+    genes_df.to_csv('%s/genes.csv' % options.out_dir)
 
 
 ################################################################################

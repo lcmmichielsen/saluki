@@ -13,7 +13,7 @@ import shutil
 import pickle
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.model_selection import GroupKFold
 
 import pysam
 
@@ -25,47 +25,60 @@ from basenji.dna_io import dna_1hot
 
 parser = argparse.ArgumentParser(description='')
 
-parser.add_argument('--dir',            dest='dir',             default='/tudelft.net/staff-bulk/ewi/insy/DBL/lmichielsen/PSI_project/HumanHipp/tfrecords_glia_neurons',
-                    help='Directory with the sequences and half-life time')
-parser.add_argument('--var_tokeep',     dest='var_tokeep',          type=str,       default="Cons,High,Low,Medium",
-                    help='Which type of exons to use during training')
+parser.add_argument('--dir',            dest='dir',             default='/tudelft.net/staff-bulk/ewi/insy/DBL/lmichielsen/PSI_project/Data/HippData',
+                    help='Directory to with PSI values')
+parser.add_argument('--out',            dest='out',             default='tfrecords_all',
+                    help='Output directory for the TFRecords')
+parser.add_argument('--var_threshold',     dest='var_threshold',          type=float,     default=0.0,
+                    help='Filter exons based on minimum delta PSI between neurons and glia')
+parser.add_argument('--max_length',     dest='max_length',          type=int,     default=3072,
+                    help='Maximum input length to the model')
+parser.add_argument('--num_layers',     dest='num_layers',          type=int,     default=4,
+                    help='Number of convolution layers in the Saluki model (related to input length)')
+parser.add_argument('--padding',     dest='padding',          type=int,     default=400,
+                    help='Padding around the exon sequence')
 parser.add_argument('--RBPs',           dest='RBPs',                type=str,       default="UCHL5,AQR,BUD13,HNRNPC,YBX3,PPIG",
                     help='Which RBPs to add as input')
-parser.add_argument('--cell_type',      dest='cell_type',           type=str,       default='Human_Astro',
-                    help='Which celltype')
+parser.add_argument('--encode',         dest='encode',              type=str,       default='sparse',
+                    help='How to encode the begin and end of the exon (either "complete" or "sparse"')
+parser.add_argument('--cell_type',      dest='cell_type',           type=str,       default='both',
+                    help='Which celltype') # 'glia' / 'neurons' / 'both'
+# If both, we generate three dir: 1. glia, 2. neuron, 3. multihead
+# If glia or neurons, we generate only the glia or neuron dir.
+
 args = parser.parse_args()
 
 general_dir = args.dir
+out_dir = args.out
 cell_type = args.cell_type
-var_tokeep = np.asarray(args.var_tokeep.split(','))
+var_threshold = args.var_threshold
+max_length = args.max_length
+num_layers = args.num_layers
+padding = args.padding
+encode = args.encode
 RBPs = args.RBPs
 if np.all(RBPs == '') == False:
     RBPs = np.asarray(args.RBPs.split(','))
+    
+general_out_dir = general_dir + '/' + out_dir
 
-# We focus now on the PSI values for Neurons & Glia
-# Make the cell type of interest an argument in the future
-PSI_var = pd.read_csv('/tudelft.net/staff-bulk/ewi/insy/DBL/lmichielsen/PSI_project/HumanHipp/altInHumans_10_90_cellType_withClassification', sep='\t')
-PSI_cons = pd.read_csv('/tudelft.net/staff-bulk/ewi/insy/DBL/lmichielsen/PSI_project/HumanHipp/consInHumans_5_95_cellType', sep='\t')
-PSI_cons['variabilityStatus'] = 'Cons'
-PSI = pd.concat((PSI_var, PSI_cons))
-PSI.index = PSI['HumanExon'] + '_' + PSI['HumanGene']
+# Read both the neuronal and glia PSI values
+# We need both for var threshold, even if we're interested in single-task model
+PSI_glia = pd.read_csv(general_dir + '/PSI_glia_norm.csv', index_col = 0)
+PSI_neur = pd.read_csv(general_dir + '/PSI_neur_norm.csv', index_col = 0)
 
-PSI_celltype = PSI[[cell_type, 'variabilityStatus', 'HumanGene']]
-idx_tokeep = np.where(PSI_celltype[cell_type].isna() == False)[0]
+idx_tokeep = (PSI_neur['0'] >= 0) & (PSI_glia['0'] >= 0)
+PSI_neur = PSI_neur.loc[idx_tokeep]
+PSI_glia = PSI_glia.loc[idx_tokeep]
 
 # Characteristics of the exons (needed to extract seq. later on)
-exon_info = pd.DataFrame(data=np.zeros((len(PSI_celltype), 5)), 
-                          columns=['chr', 'start', 'end', 'ENSG', 'strand'])
-
-for i in range(len(PSI_celltype)):
-    
-    exon_info.iloc[i, [0,1,2,4,3]] = PSI_celltype.index[i].split('_')
-
-exon_info_tokeep = exon_info.iloc[idx_tokeep]
+exon_info = pd.DataFrame(PSI_glia.index)[0].str.split('_', expand=True)
+exon_info = exon_info.rename(columns={0: 'chr', 1: 'start', 2: 'end',
+                                      3: 'ENSG', 4: 'strand'})
 
 ## Load the peaks
 if np.all(RBPs == '') == False:
-    peaks_path = '/tudelft.net/staff-bulk/ewi/insy/DBL/lmichielsen/PSI_project/eCLIP/RBP_coor_repl.pickle'
+    peaks_path = general_dir + '/RBP_coor_repl.pickle'
     with open(peaks_path, 'rb') as handle:
         RBP_coor_repl, rows, columns = pickle.load(handle)
     peaks = pd.DataFrame(RBP_coor_repl, index=rows, columns=columns)
@@ -73,10 +86,11 @@ else:
     peaks=0
 
 # Function to generate the data
-def create_tfrecords(PSI_tokeep, exon_info, train_idxs, val_idxs, 
-                     test_idxs, fold, general_dir, peaks):
+def create_tfrecords(PSI, exon_info, train_idxs, val_idxs, 
+                     test_idxs, fold, general_out_dir, peaks,
+                     max_length, num_layers, padding, encode):
     
-    fold_dir = general_dir + '/fold' + str(num_fold)
+    fold_dir = general_out_dir + '/fold' + str(num_fold)
     tfr_dir = fold_dir + '/tfrecords' 
     Path(fold_dir).mkdir(parents=True, exist_ok=True)
     Path(tfr_dir).mkdir(parents=True, exist_ok=True)
@@ -88,9 +102,9 @@ def create_tfrecords(PSI_tokeep, exon_info, train_idxs, val_idxs,
     split[train_idxs] = 'train'
     split[val_idxs] = 'valid'
     split[test_idxs] = 'test'
-    target = PSI_tokeep.values[:,:1]
-    genes = pd.DataFrame(np.hstack((split,np.reshape(PSI_tokeep['variabilityStatus'].values,(-1,1)),target)), 
-                         index=PSI_tokeep.index, columns=np.hstack((['split', 'varStatus'], PSI_tokeep.columns[:1])))
+    target = PSI.values
+    genes = pd.DataFrame(np.hstack((split,target)), 
+                         index=PSI.index, columns=np.hstack((['split'], PSI.columns)))
     genes = genes[genes['split'] != '']
     genes.to_csv(fold_dir + '/genes.csv')
     
@@ -98,8 +112,8 @@ def create_tfrecords(PSI_tokeep, exon_info, train_idxs, val_idxs,
     tf_opts = tf.io.TFRecordOptions(compression_type='ZLIB')
     seqs_per_tfr = 256
     fold_labels = ['train', 'valid', 'test']
-    max_seq_length = 3072
-    padding = 400
+    max_seq_length = max_length
+    padding = padding
     
     # open FASTA
     fasta_file = '../Ref/GRCh38.primary_assembly.genome.fa'
@@ -115,9 +129,9 @@ def create_tfrecords(PSI_tokeep, exon_info, train_idxs, val_idxs,
     num_folds = 3 #train-val-test
     
     for fi in range(num_folds):
-        exon_ID_set = PSI_tokeep.index[fold_indexes[fi]]
+        exon_ID_set = PSI.index[fold_indexes[fi]]
         exon_info_set = exon_info.iloc[fold_indexes[fi]]
-        PSI_val_set = PSI_tokeep.iloc[fold_indexes[fi],:1]
+        PSI_val_set = PSI.iloc[fold_indexes[fi]]
         
         num_set = exon_ID_set.shape[0]
         
@@ -145,8 +159,12 @@ def create_tfrecords(PSI_tokeep, exon_info, train_idxs, val_idxs,
                     seq_end = int(exon_info_set['end'].iloc[si])+1 #Because fasta.fetch doesn't include end bp
                     seq_strand = exon_info_set['strand'].iloc[si]
                     gene = exon_info_set['ENSG'].iloc[si]
-    
-                    if(seq_end-seq_start+2*padding) > max_seq_length:
+                    
+                    if (seq_end-seq_start) > max_seq_length:
+                        seq_start_ = seq_start-100
+                        seq_end_ = seq_start_ + max_seq_length
+                        splicing_ind = np.array([100], dtype=np.int64)    
+                    elif(seq_end-seq_start+2*padding) > max_seq_length:
                         pad_temp = np.floor((max_seq_length - (seq_end-seq_start+1))/2)
                         seq_start_ = seq_start - pad_temp
                         seq_end_ = seq_end + pad_temp
@@ -172,8 +190,14 @@ def create_tfrecords(PSI_tokeep, exon_info, train_idxs, val_idxs,
                     
                     # splicing
                     splicing = np.zeros((seq_len,1), dtype=np.int8)
-                    splicing[splicing_ind] = 1
-    
+                    if encode == 'sparse':
+                        splicing[splicing_ind] = 1
+                    else:
+                        if len(splicing_ind) == 2:
+                            splicing[splicing_ind[0]:splicing_ind[1]] =1
+                        else:
+                            splicing[splicing_ind[0]:] = 1
+                                
                     # get targets
                     targets = PSI_val_set.iloc[si].values
                     targets = targets.reshape((1,-1)).astype('float64')
@@ -218,7 +242,7 @@ def create_tfrecords(PSI_tokeep, exon_info, train_idxs, val_idxs,
     # Write statistics.json
     
     stats_dict = {}
-    stats_dict['num_targets'] = PSI_tokeep.shape[1]-2
+    stats_dict['num_targets'] = 1
     stats_dict['seq_length'] = max_seq_length
     stats_dict['target_length'] = 1
     
@@ -257,7 +281,67 @@ def create_tfrecords(PSI_tokeep, exon_info, train_idxs, val_idxs,
     model_dict['dropout'] = 0.3
     model_dict['l2_scale'] = 0.001
     model_dict['ln_epsilon'] = 0.007
-    model_dict['num_layers'] = 4
+    model_dict['num_layers'] = num_layers
+    model_dict['bn_momentum'] = 0.90
+    
+    params_dict = {}
+    params_dict['train'] = train_dict
+    params_dict['model'] = model_dict
+    
+    with open('%s/params.json' % fold_dir, 'w') as params_json_out:
+        json.dump(params_dict, params_json_out, indent=4)
+
+
+# Function to generate the data
+def create_multihead_dir(fold, general_out_dir, max_length, num_layers):
+    
+    fold_dir = general_out_dir + '/fold' + str(num_fold)
+    Path(fold_dir).mkdir(parents=True, exist_ok=True)
+
+    # # Write statistics.json
+    # stats_dict = {}
+    # stats_dict['num_targets'] = 2
+    # stats_dict['seq_length'] = max_seq_length
+    # stats_dict['target_length'] = 1
+    
+    # for fi in range(num_folds):
+    #     stats_dict['%s_seqs' % fold_labels[fi]] = len(fold_indexes[fi])
+    
+    # with open('%s/statistics.json' % fold_dir, 'w') as stats_json_out:
+    #     json.dump(stats_dict, stats_json_out, indent=4)
+    
+    max_seq_length = max_length
+    
+    # Copy the params.json
+    train_dict = {}
+    train_dict['batch_size'] = 64
+    train_dict['optimizer'] = 'adam'
+    train_dict['loss'] = 'mse'
+    train_dict['learning_rate'] = 0.0001
+    train_dict['adam_beta1'] = 0.90
+    train_dict['adam_beta2'] = 0.998
+    train_dict['global_clipnorm'] = 0.5
+    train_dict['train_epochs_min'] = 100
+    train_dict['train_epochs_max'] = 500
+    train_dict['patience'] = 50
+    
+    model_dict = {}
+    model_dict['activation'] = 'relu'
+    model_dict['rnn_type'] = 'gru'
+    model_dict['seq_length'] = max_seq_length
+    if np.all(RBPs == '') == False:
+        model_dict['seq_depth'] = len(RBPs) + 5
+    else:
+        model_dict['seq_depth'] = 5
+    model_dict['augment_shift'] = 3
+    model_dict['num_targets'] = [1,1]
+    model_dict['heads'] = 2
+    model_dict['filters'] = 64
+    model_dict['kernel_size'] = 5
+    model_dict['dropout'] = 0.3
+    model_dict['l2_scale'] = 0.001
+    model_dict['ln_epsilon'] = 0.007
+    model_dict['num_layers'] = num_layers
     model_dict['bn_momentum'] = 0.90
     
     params_dict = {}
@@ -269,56 +353,58 @@ def create_tfrecords(PSI_tokeep, exon_info, train_idxs, val_idxs,
 
 
 # Do the CV
-# Now we only save 1 fold to test things quickly
-# In the future, save all folds
-genes = PSI_celltype['HumanGene']
-varStatus = PSI_celltype['variabilityStatus']
-cv = StratifiedGroupKFold(n_splits=10, random_state=0, shuffle=True)
-
+genes = exon_info['ENSG']
+cv = GroupKFold(n_splits=10)
 num_fold = 0
 
-for train_val_idxs, test_idxs in cv.split(varStatus, varStatus, genes):   
+for train_val_idxs, test_idxs in cv.split(PSI_glia, PSI_glia, genes):   
     
-    cv = StratifiedGroupKFold(n_splits=9, random_state=0, shuffle=True)
-    ynew = varStatus[train_val_idxs]
-    groupsnew = genes[train_val_idxs]
-    
-    for train_idxs, val_idxs in cv.split(ynew, ynew, groupsnew):
-        train_idxs = train_val_idxs[train_idxs]
-        val_idxs = train_val_idxs[val_idxs]
-        break
-    
-    print('Fold:' + str(num_fold))
-    print('Size training set: ')
-    print(len(train_idxs))
-    print('Size validation set: ')
-    print(len(val_idxs))
-    print('Size test set: ')
-    print(len(test_idxs))
-    
-    # Filter the train-val-test idxs by var status
-    train_idxs = train_idxs[np.squeeze(np.isin(varStatus[train_idxs], var_tokeep))]
-    val_idxs = val_idxs[np.squeeze(np.isin(varStatus[val_idxs], var_tokeep))]
-    test_idxs = test_idxs[np.squeeze(np.isin(varStatus[test_idxs], var_tokeep))]
-    
-    # Second filtering step to filter out the NaNs?
-    train_idxs = np.intersect1d(train_idxs, idx_tokeep)
-    val_idxs = np.intersect1d(val_idxs, idx_tokeep)
-    test_idxs = np.intersect1d(test_idxs, idx_tokeep)
-    
-    print('\n')
-    print('After filtering: ')
-    print('Size training set: ')
-    print(len(train_idxs))
-    print('Size validation set: ')
-    print(len(val_idxs))
-    print('Size test set: ')
-    print(len(test_idxs))
+    cv2 = GroupKFold(n_splits=9)
+    train_val_indices = list(cv2.split(PSI_glia.iloc[train_val_idxs],
+                                       PSI_glia.iloc[train_val_idxs],
+                                       genes[train_val_idxs]))
+    train_idxs, val_idxs = train_val_indices[0]
+    train_idxs = train_val_idxs[train_idxs]
+    val_idxs = train_val_idxs[val_idxs]
         
-    ### Call function
-    create_tfrecords(PSI_celltype, exon_info,
-                     train_idxs, val_idxs, test_idxs, num_fold, general_dir,
-                     peaks)
+    print('Size training set: ')
+    print(len(train_idxs))
+    print('Size validation set: ')
+    print(len(val_idxs))
+    print('Size test set: ')
+    print(len(test_idxs))
+    
+    if var_threshold > 0:
+        idx_var = np.where(np.abs(PSI_glia-PSI_neur) > var_threshold)[0]
+        train_idxs = np.intersect1d(train_idxs, idx_var)
+        val_idxs = np.intersect1d(val_idxs, idx_var)
+        test_idxs = np.intersect1d(test_idxs, idx_var)
+    
+        print('\n')
+        print('After filtering: ')
+        print('Size training set: ')
+        print(len(train_idxs))
+        print('Size validation set: ')
+        print(len(val_idxs))
+        print('Size test set: ')
+        print(len(test_idxs))
+    
+    if (cell_type == 'glia') or (cell_type == 'both'):
+        create_tfrecords(PSI_glia, exon_info, train_idxs,
+                         val_idxs, test_idxs, num_fold, 
+                         general_out_dir + '/glia', peaks,
+                         max_length, num_layers, padding, encode)
+        
+    if (cell_type == 'neurons') or (cell_type == 'both'):
+        create_tfrecords(PSI_neur, exon_info, train_idxs,
+                         val_idxs, test_idxs, num_fold, 
+                         general_out_dir + '/neur', peaks,
+                         max_length, num_layers, padding, encode)
+        
+    if (cell_type == 'both'):
+        create_multihead_dir(num_fold, general_out_dir + '/both',
+                             max_length, num_layers)
+    
     
     num_fold += 1
     if num_fold == 10:

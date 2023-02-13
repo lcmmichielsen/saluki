@@ -217,7 +217,7 @@ class RnaNN:
       self.model_trunk.load_weights(model_file)
     else:
       self.models[head_i].load_weights(model_file)
-      self.model = self.models[head_i]
+
 
   def save(self, model_file, trunk=False):
     if trunk:

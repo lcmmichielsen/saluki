@@ -11,7 +11,7 @@ import json
 import shutil
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import StratifiedGroupKFold
+from sklearn.model_selection import GroupKFold
 
 import pysam
 
@@ -21,43 +21,46 @@ os.chdir('/tudelft.net/staff-bulk/ewi/insy/DBL/lmichielsen/PSI_project/saluki')
 
 from basenji.dna_io import dna_1hot
 
+
+##### DONT USE THIS SCRIPT ANYMORE
+
 parser = argparse.ArgumentParser(description='')
 
-parser.add_argument('--dir',            dest='dir',             default='/tudelft.net/staff-bulk/ewi/insy/DBL/lmichielsen/PSI_project/HumanHipp/tfrecords_glia_neurons',
-                    help='Directory with the sequences and half-life time')
-parser.add_argument('--var_tokeep',     dest='var_tokeep',          type=str,       default="Cons,High,Low,Medium",
-                    help='Which type of exons to use during training')
-parser.add_argument('--cell_type',      dest='cell_type',           type=str,       default='Human_Astro',
-                    help='Which celltype')
+parser.add_argument('--dir',            dest='dir',             default='/tudelft.net/staff-bulk/ewi/insy/DBL/lmichielsen/PSI_project/Data/HippData',
+                    help='Directory to with PSI values')
+parser.add_argument('--out',            dest='out',             default='tfrecords_0_both',
+                    help='Output directory for the TFRecords')
+parser.add_argument('--var_threshold',     dest='var_threshold',          type=float,     default=0.0,
+                    help='Filter exons based on minimum delta PSI between neurons and glia')
+parser.add_argument('--cell_type',      dest='cell_type',           type=str,       default='both',
+                    help='Which celltype') # 'glia' / 'neurons' / 'both'
 args = parser.parse_args()
 
 general_dir = args.dir
+out_dir = args.out
 cell_type = args.cell_type
-var_tokeep = np.asarray(args.var_tokeep.split(','))
+var_threshold = args.var_threshold
 
-try:
-    os.mkdir(general_dir)
-except:
-    pass
-
-tfr_dir = general_dir + '/tfrecords'
+tfr_dir = general_dir + '/' + out_dir
 
 try:
     os.mkdir(tfr_dir)
 except:
     pass
 
-# We focus now on the PSI values for Neurons & Glia
-# Make the cell type of interest an argument in the future
-PSI_var = pd.read_csv('/tudelft.net/staff-bulk/ewi/insy/DBL/lmichielsen/PSI_project/HumanHipp/altInHumans_10_90_cellType_withClassification', sep='\t')
-PSI_cons = pd.read_csv('/tudelft.net/staff-bulk/ewi/insy/DBL/lmichielsen/PSI_project/HumanHipp/consInHumans_5_95_cellType', sep='\t')
-PSI_cons['variabilityStatus'] = 'Cons'
-PSI = pd.concat((PSI_var, PSI_cons))
-PSI.index = PSI['HumanExon'] + '_' + PSI['HumanGene']
+# Read both the neuronal and glia PSI values
+# We need both for var threshold, even if we're interested in single-task model
+PSI_glia = pd.read_csv(general_dir + '/PSI_glia_norm.csv', index_col = 0)
+PSI_neur = pd.read_csv(general_dir + '/PSI_neur_norm.csv', index_col = 0)
 
-PSI_celltype = PSI[[cell_type, 'variabilityStatus', 'HumanGene']]
-PSI_tokeep = PSI_celltype[PSI_celltype[cell_type].isna() == False]
+idx_tokeep = (PSI_neur['0'] >= 0) & (PSI_glia['0'] >= 0)
+PSI_neur = PSI_neur.loc[idx_tokeep]
+PSI_glia = PSI_glia.loc[idx_tokeep]
 
+# Characteristics of the exons (needed to extract seq. later on)
+exon_info = pd.DataFrame(PSI_glia.index)[0].str.split('_', expand=True)
+exon_info = exon_info.rename(columns={0: 'chr', 1: 'start', 2: 'end',
+                                      3: 'ENSG', 4: 'strand'})
 
 # PSI_glia = np.mean(PSI.iloc[:,2:4], axis=1)
 # PSI_neurons = np.mean(PSI.iloc[:,4:6], axis=1)
@@ -72,20 +75,20 @@ PSI_tokeep = PSI_celltype[PSI_celltype[cell_type].isna() == False]
 # Do the CV
 # Now we only save 1 fold to test things quickly
 # In the future, save all folds
-genes = PSI_tokeep['HumanGene']
-varStatus = PSI_tokeep['variabilityStatus']
+genes = exon_info['ENSG']
 fold=0
-cv = StratifiedGroupKFold(n_splits=10, random_state=0, shuffle=True)
+cv = GroupKFold(n_splits=10)
 
-for train_val_idxs, test_idxs in cv.split(varStatus, varStatus, genes):   
-    cv = StratifiedGroupKFold(n_splits=9, random_state=0, shuffle=True)
-    ynew = varStatus[train_val_idxs]
-    groupsnew = genes[train_val_idxs]
-    for train_idxs, val_idxs in cv.split(ynew, ynew, groupsnew):
-        train_idxs = train_val_idxs[train_idxs]
-        val_idxs = train_val_idxs[val_idxs]
-        break
-    
+### Look at the RBP code to see how we did it for all folds!!
+for train_val_idxs, test_idxs in cv.split(PSI_glia, PSI_glia, genes):   
+    cv2 = GroupKFold(n_splits=9)
+    train_val_indices = list(cv2.split(PSI_glia.iloc[train_val_idxs],
+                                       PSI_glia.iloc[train_val_idxs],
+                                       genes[train_val_idxs]))
+    train_idxs, val_idxs = train_val_indices[0]
+    train_idxs = train_val_idxs[train_idxs]
+    val_idxs = train_val_idxs[val_idxs]
+        
     print('Size training set: ')
     print(len(train_idxs))
     print('Size validation set: ')
@@ -94,31 +97,25 @@ for train_val_idxs, test_idxs in cv.split(varStatus, varStatus, genes):
     print(len(test_idxs))
     
     # Filter the train-val-test idxs by var status
-    train_idxs = train_idxs[np.squeeze(np.isin(varStatus[train_idxs], var_tokeep))]
-    val_idxs = val_idxs[np.squeeze(np.isin(varStatus[val_idxs], var_tokeep))]
-    test_idxs = test_idxs[np.squeeze(np.isin(varStatus[test_idxs], var_tokeep))]
-    print('\n')
-    print('After filtering: ')
-    print('Size training set: ')
-    print(len(train_idxs))
-    print('Size validation set: ')
-    print(len(val_idxs))
-    print('Size test set: ')
-    print(len(test_idxs))
+    if var_threshold > 0:
+        idx_var = np.where(np.abs(PSI_glia-PSI_neur) > var_threshold)[0]
+        train_idxs = np.intersect1d(train_idxs, idx_var)
+        val_idxs = np.intersect1d(val_idxs, idx_var)
+        test_idxs = np.intersect1d(test_idxs, idx_var)
+    
+        print('\n')
+        print('After filtering: ')
+        print('Size training set: ')
+        print(len(train_idxs))
+        print('Size validation set: ')
+        print(len(val_idxs))
+        print('Size test set: ')
+        print(len(test_idxs))
     
     break
 
 fold_indexes = [train_idxs, val_idxs, test_idxs]
 
-# Characteristics of the exons (needed to extract seq. later on)
-exon_info = pd.DataFrame(data=np.zeros((len(PSI_tokeep), 5)), 
-                          columns=['chr', 'start', 'end', 'ENSG', 'strand'])
-
-for i in range(len(PSI_tokeep)):
-    
-    exon_info.iloc[i, [0,1,2,4,3]] = PSI_tokeep.index[i].split('_')
-
-exon_info.iloc[:5]
 
 # Write the file genes.tsv
 split = np.zeros((len(exon_info),1), dtype='<U5')
