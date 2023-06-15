@@ -27,6 +27,12 @@ parser = argparse.ArgumentParser(description='')
 
 parser.add_argument('--dir',            dest='dir',             default='/tudelft.net/staff-bulk/ewi/insy/DBL/lmichielsen/PSI_project/Data/HippData',
                     help='Directory to with PSI values')
+parser.add_argument('--file_glia',        dest='file_glia',     default='PSI_glia_norm.csv',
+                    help='File with glia PSI values')
+parser.add_argument('--file_neur',        dest='file_neur',     default='PSI_neur_norm.csv',
+                    help='File with neur PSI values')
+parser.add_argument('--species',        dest='species',     default='human',
+                    help='human or mouse')
 parser.add_argument('--out',            dest='out',             default='tfrecords_all',
                     help='Output directory for the TFRecords')
 parser.add_argument('--var_threshold',     dest='var_threshold',          type=float,     default=0.0,
@@ -49,6 +55,9 @@ parser.add_argument('--cell_type',      dest='cell_type',           type=str,   
 args = parser.parse_args()
 
 general_dir = args.dir
+file_glia = args.file_glia
+file_neur = args.file_neur
+species = args.species
 out_dir = args.out
 cell_type = args.cell_type
 var_threshold = args.var_threshold
@@ -64,8 +73,8 @@ general_out_dir = general_dir + '/' + out_dir
 
 # Read both the neuronal and glia PSI values
 # We need both for var threshold, even if we're interested in single-task model
-PSI_glia = pd.read_csv(general_dir + '/PSI_glia_norm.csv', index_col = 0)
-PSI_neur = pd.read_csv(general_dir + '/PSI_neur_norm.csv', index_col = 0)
+PSI_glia = pd.read_csv(general_dir + '/' + file_glia, index_col = 0)
+PSI_neur = pd.read_csv(general_dir + '/' + file_neur, index_col = 0)
 
 idx_tokeep = (PSI_neur['0'] >= 0) & (PSI_glia['0'] >= 0)
 PSI_neur = PSI_neur.loc[idx_tokeep]
@@ -116,7 +125,10 @@ def create_tfrecords(PSI, exon_info, train_idxs, val_idxs,
     padding = padding
     
     # open FASTA
-    fasta_file = '../Ref/GRCh38.primary_assembly.genome.fa'
+    if species == 'human':
+        fasta_file = '../Ref/GRCh38.primary_assembly.genome.fa'
+    elif species == 'mouse':
+        fasta_file = '../Ref/mm10.fa'
     fasta_open = pysam.Fastafile(fasta_file)
     
     def rc(seq):

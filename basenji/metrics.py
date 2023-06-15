@@ -371,3 +371,4 @@ class R2(tf.keras.metrics.Metric):
 
   def reset_state(self):
     K.batch_set_value([(v, np.zeros(self._shape)) for v in self.variables])
+    
